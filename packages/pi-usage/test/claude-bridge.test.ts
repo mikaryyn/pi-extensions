@@ -3,6 +3,7 @@ import { test } from "vitest";
 import {
   adapterForProvider,
   formatUsageReport,
+  formatUsageStatusline,
   normalizeClaudeOAuthUsagePayload,
   parseClaudeCodeAccessToken,
 } from "../src/index.js";
@@ -67,8 +68,17 @@ test("Claude report renders bars and currency", () => {
   assert.match(text, /Extra usage spent:\s+EUR 0.74/);
 });
 
-test("Claude bridge adapter is registered without a statusline", () => {
-  assert.equal(adapterForProvider("claude-bridge")?.publishesStatusline, false);
+test("Claude bridge adapter publishes a statusline", () => {
+  assert.notEqual(adapterForProvider("claude-bridge")?.publishesStatusline, false);
+});
+
+test("Claude statusline shows remaining session and weekly percentages", () => {
+  const report = normalizeClaudeOAuthUsagePayload({ ...payload, seven_day_opus: { utilization: 50 } }, 1000);
+  assert.equal(formatUsageStatusline(report), "claude 98% 5h 76% wk");
+  assert.equal(
+    formatUsageStatusline(normalizeClaudeOAuthUsagePayload({ extra_usage: payload.extra_usage }, 1)),
+    undefined,
+  );
 });
 
 test("Claude Code credential parsing handles valid, expired, missing, and malformed input", () => {

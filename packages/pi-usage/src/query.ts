@@ -402,7 +402,6 @@ export const CLAUDE_BRIDGE_ADAPTER: UsageProviderAdapter = {
   id: CLAUDE_BRIDGE_PROVIDER_ID,
   displayName: "Claude",
   semantics: { kind: "consumer-subscription", label: "Claude subscription limits" },
-  publishesStatusline: false,
   async query(auth, signal, timeoutMs) {
     const payload = await fetchProviderJson(CLAUDE_OAUTH_USAGE_URL, auth, signal, timeoutMs, "Claude usage endpoint", {
       redirect: "error",

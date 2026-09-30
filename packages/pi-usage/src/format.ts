@@ -136,6 +136,7 @@ function formatStatusline(
       decorateCodexPrefix,
     );
   }
+  if (report.providerId === "claude-bridge") return formatClaudeStatusline(report);
   if (report.providerId === "deepseek") return formatDeepSeekStatusline(report);
   if (report.providerId === "fireworks") return formatFireworksStatusline(report);
   if (report.providerId === "vercel-ai-gateway") return formatVercelAIGatewayStatusline(report);
@@ -224,6 +225,16 @@ function formatClaudeReport(lines: string[], report: UsageReport): void {
         : formatMetricValue(metric.value, metric.unit);
     lines.push(`${`${metric.label}:`.padEnd(VALUE_COLUMN)}${value}`);
   }
+}
+
+function formatClaudeStatusline(report: UsageReport): string | undefined {
+  const parts = report.buckets
+    .filter((bucket) => (bucket.id === "five-hour" || bucket.id === "weekly") && bucket.remaining !== undefined)
+    .map((bucket) => {
+      const fallback = bucket.id === "weekly" ? "weekly" : "5h";
+      return `${clampPercent(bucket.remaining ?? 0).toFixed(0)}% ${formatWindowLabel(bucket.windowMinutes, fallback, true)}`;
+    });
+  return parts.length > 0 ? `claude ${parts.join(" ")}` : undefined;
 }
 
 function formatDeepSeekReport(lines: string[], report: UsageReport): void {

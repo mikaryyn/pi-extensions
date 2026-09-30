@@ -292,9 +292,10 @@ They may change without notice, and this paragraph is the contract evidence for 
 - Semantics: Claude subscription session and weekly limits
 - Source: Anthropic's undocumented `GET https://api.anthropic.com/api/oauth/usage` endpoint with the `anthropic-beta: oauth-2025-04-20` header
 - Displayed data: session (5 hour) and weekly utilization with reset times, Opus and Sonnet weekly windows when present, and extra-usage spend
-- Statusline: not published
+- Statusline example: `claude 98% 5h 76% wk` (remaining session and weekly percentages)
 
 Claude has no Pi-registry credential, so `pi-usage` reads the existing Claude Code login: the macOS keychain item `Claude Code-credentials`, or `.credentials.json` under `$CLAUDE_CONFIG_DIR` or `~/.claude` on other platforms.
+Each statusline refresh reads the login again, so the keychain access applies to background refreshes as well.
 The first keychain read may show a macOS access prompt.
 The token is sent only to the fixed Anthropic URL, redirects are rejected, and the token is redacted from errors.
 `pi-usage` never refreshes or writes the login, so an expired token fails with a request to run `claude` once.
