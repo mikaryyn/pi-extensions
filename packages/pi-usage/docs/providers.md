@@ -18,6 +18,7 @@ The README contains the capability overview and shared security requirements.
 - [Baseten](#baseten-model-apis-spend)
 - [OpenCode Go](#opencode-go-zen)
 - [Command Code](#command-code)
+- [Claude](#claude-subscription-limits)
 - [xAI](#xai-consumer-subscriptions)
 - [Z.AI](#zai-glm-coding-plan)
 
@@ -284,6 +285,19 @@ Pi still resolves its stored `/login` API key through the normal provider regist
 The account response is required; the credits, plan, and period responses degrade to individual notes when unavailable, and a plan without rolling limits reports that instead of inventing windows.
 These are undocumented Command Code endpoints pinned on 2026-09-29 against live responses and the same routes the Command Code CLI `/usage` command reads.
 They may change without notice, and this paragraph is the contract evidence for the reviewed behavior.
+
+### Claude subscription limits
+
+- Provider ID: `claude-bridge`
+- Semantics: Claude subscription session and weekly limits
+- Source: Anthropic's undocumented `GET https://api.anthropic.com/api/oauth/usage` endpoint with the `anthropic-beta: oauth-2025-04-20` header
+- Displayed data: session (5 hour) and weekly utilization with reset times, Opus and Sonnet weekly windows when present, and extra-usage spend
+- Statusline: not published
+
+Claude has no Pi-registry credential, so `pi-usage` reads the existing Claude Code login: the macOS keychain item `Claude Code-credentials`, or `.credentials.json` under `$CLAUDE_CONFIG_DIR` or `~/.claude` on other platforms.
+The first keychain read may show a macOS access prompt.
+The token is sent only to the fixed Anthropic URL, redirects are rejected, and the token is redacted from errors.
+`pi-usage` never refreshes or writes the login, so an expired token fails with a request to run `claude` once.
 
 ### xAI consumer subscriptions
 

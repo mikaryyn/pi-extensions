@@ -164,6 +164,14 @@ export type GitHubCopilotUsagePayload = {
   quota_snapshots?: unknown;
 };
 
+export type ClaudeOAuthUsagePayload = {
+  five_hour?: unknown;
+  seven_day?: unknown;
+  seven_day_opus?: unknown;
+  seven_day_sonnet?: unknown;
+  extra_usage?: unknown;
+};
+
 export type OpenRouterKeyPayload = {
   data?: unknown;
 };

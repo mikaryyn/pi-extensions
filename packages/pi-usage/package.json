@@ -31,7 +31,8 @@
     "zai",
     "glm",
     "xai",
-    "grok"
+    "grok",
+    "claude"
   ],
   "files": [
     "src",

@@ -35,6 +35,10 @@ export {
 } from "./core.js";
 export { formatProviderStates, formatUsageReport, formatUsageStatusline } from "./format.js";
 export { normalizeBasetenBillingUsagePayload } from "./providers/baseten.js";
+export {
+  normalizeClaudeOAuthUsagePayload,
+  parseClaudeCodeAccessToken,
+} from "./providers/claude-bridge.js";
 export { normalizeCodexBackendPayload } from "./providers/codex.js";
 export { commandCodeOrgId, normalizeCommandCodeUsagePayload } from "./providers/command-code.js";
 export { normalizeDeepSeekBalancePayload } from "./providers/deepseek.js";
@@ -59,6 +63,7 @@ export { normalizeXaiBillingPayload } from "./providers/xai.js";
 export { normalizeZaiQuotaPayload, normalizeZaiSubscriptionPayload } from "./providers/zai.js";
 export {
   adapterForProvider,
+  CLAUDE_BRIDGE_ADAPTER,
   isStaleExtensionContextError,
   providerIsConfigured,
   queryProviderUsage,
@@ -83,6 +88,7 @@ export {
 } from "./settings.js";
 export type {
   BasetenBillingUsagePayload,
+  ClaudeOAuthUsagePayload,
   CommandCodeAccountPayload,
   CommandCodeCreditsPayload,
   CommandCodeSubscriptionPayload,

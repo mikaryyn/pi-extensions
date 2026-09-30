@@ -6,6 +6,13 @@ import { createUsageAuthGuard, type UsageAuthLifecycle } from "./auth-resolution
 import { abortError, errorMessage, fingerprintResolvedAuth, redactUsageError } from "./core.js";
 import { fallbackOAuthCredentialCandidates, type OAuthCredentialCandidateReader } from "./oauth-credential-source.js";
 import { normalizeBasetenBillingUsagePayload } from "./providers/baseten.js";
+import {
+  CLAUDE_BRIDGE_PROVIDER_ID,
+  CLAUDE_OAUTH_BETA,
+  CLAUDE_OAUTH_USAGE_URL,
+  normalizeClaudeOAuthUsagePayload,
+  readClaudeCodeAccessToken,
+} from "./providers/claude-bridge.js";
 import { normalizeCodexBackendPayload } from "./providers/codex.js";
 import { commandCodeOrgId, normalizeCommandCodeUsagePayload } from "./providers/command-code.js";
 import { normalizeDeepSeekBalancePayload } from "./providers/deepseek.js";
@@ -27,6 +34,7 @@ import { normalizeZaiQuotaPayload, normalizeZaiSubscriptionPayload } from "./pro
 import { zaiResponseError } from "./providers/zai-errors.js";
 import type {
   BasetenBillingUsagePayload,
+  ClaudeOAuthUsagePayload,
   CodexBackendPayload,
   CommandCodeAccountPayload,
   CommandCodeCreditsPayload,
@@ -389,8 +397,22 @@ export const XAI_ADAPTER: UsageProviderAdapter = {
   },
 };
 
+// Claude usage is read through Claude Code's login, so it stays outside the Pi-registry auth path.
+export const CLAUDE_BRIDGE_ADAPTER: UsageProviderAdapter = {
+  id: CLAUDE_BRIDGE_PROVIDER_ID,
+  displayName: "Claude",
+  semantics: { kind: "consumer-subscription", label: "Claude subscription limits" },
+  publishesStatusline: false,
+  async query(auth, signal, timeoutMs) {
+    const payload = await fetchProviderJson(CLAUDE_OAUTH_USAGE_URL, auth, signal, timeoutMs, "Claude usage endpoint", {
+      redirect: "error",
+    });
+    return normalizeClaudeOAuthUsagePayload(payload as ClaudeOAuthUsagePayload, Date.now());
+  },
+};
+
 export function usageAdapters(): readonly UsageProviderAdapter[] {
-  return [...SUPPORTED_ADAPTERS, XAI_ADAPTER];
+  return [...SUPPORTED_ADAPTERS, XAI_ADAPTER, CLAUDE_BRIDGE_ADAPTER];
 }
 
 export function adapterForProvider(providerId: string | undefined): UsageProviderAdapter | undefined {
@@ -415,6 +437,9 @@ export async function resolveUsageAuth(
 ): Promise<ResolvedUsageAuth | undefined> {
   const guard = createUsageAuthGuard(options);
   guard.check();
+  if (adapter.id === CLAUDE_BRIDGE_PROVIDER_ID) {
+    return guard.wait(() => resolveClaudeBridgeUsageAuth(ctx, salt));
+  }
   if (ctx.model?.provider === adapter.id && !hasOfficialOrigin(ctx.model, adapter.id)) {
     throw new Error(
       `${adapter.displayName} usage cannot send a custom provider base URL credential to the official usage endpoint.`,
@@ -577,6 +602,26 @@ export async function resolveUsageAuth(
   });
 }
 
+// SAFETY: the bridge model's baseUrl is not the real API, so the token is only ever sent to the fixed Anthropic URL.
+async function resolveClaudeBridgeUsageAuth(
+  ctx: ExtensionContext,
+  salt: Uint8Array,
+): Promise<ResolvedUsageAuth | undefined> {
+  const model = candidateModels(ctx, CLAUDE_BRIDGE_PROVIDER_ID)[0];
+  if (!model) return undefined;
+  const token = await readClaudeCodeAccessToken();
+  if (!token) return undefined;
+  const authorization = `Bearer ${token}`;
+  const headers = { Authorization: authorization, "anthropic-beta": CLAUDE_OAUTH_BETA };
+  return {
+    apiKey: token,
+    headers,
+    fingerprint: fingerprintResolvedAuth({ headers }, salt),
+    secrets: [token, authorization],
+    model,
+  };
+}
+
 export async function queryProviderUsage(
   adapter: UsageProviderAdapter,
   auth: ResolvedUsageAuth,
@@ -625,6 +670,7 @@ export async function queryProviderUsage(
 }
 
 export function providerIsConfigured(ctx: ExtensionContext, providerId: string): boolean {
+  if (providerId === CLAUDE_BRIDGE_PROVIDER_ID) return candidateModels(ctx, providerId).length > 0;
   try {
     const status = ctx.modelRegistry.getProviderAuthStatus(providerId);
     return status.configured && moonshotProviderAuthSourceIsAllowed(ctx, providerId, status.source, status.label);

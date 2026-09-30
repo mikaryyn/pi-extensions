@@ -51,6 +51,7 @@ export function formatUsageReport(report: UsageReport, displayState: UsageDispla
   } else if (report.providerId === "minimax" || report.providerId === "minimax-cn") {
     formatMiniMaxReport(lines, report);
   } else if (report.providerId === "xai") formatXaiReport(lines, report);
+  else if (report.providerId === "claude-bridge") formatClaudeReport(lines, report);
   else if (report.providerId === "zai" || report.providerId === "zai-coding-cn") {
     formatZaiReport(lines, report);
   } else formatGenericReport(lines, report);
@@ -209,6 +210,19 @@ function formatCodexReport(lines: string[], report: UsageReport): void {
     } else if (metric.id === "credits") {
       lines.push(`${"Credits:".padEnd(VALUE_COLUMN)}${formatMetricValue(metric.value, metric.unit)}`);
     }
+  }
+}
+
+function formatClaudeReport(lines: string[], report: UsageReport): void {
+  for (const bucket of report.buckets) {
+    lines.push(`${`${bucket.label}:`.padEnd(VALUE_COLUMN)}${formatPercentBucket(bucket)}`);
+  }
+  for (const metric of report.metrics) {
+    const value =
+      metric.id === "extra-usage" && typeof metric.value === "number" && metric.currency
+        ? `${metric.currency} ${metric.value.toFixed(2)}`
+        : formatMetricValue(metric.value, metric.unit);
+    lines.push(`${`${metric.label}:`.padEnd(VALUE_COLUMN)}${value}`);
   }
 }
 

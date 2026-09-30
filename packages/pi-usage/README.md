@@ -191,6 +191,7 @@ Currencies and billing targets remain separate.
 | Baseten | Organization-wide trailing 30-day Model APIs spend after credits |
 | OpenCode Go | Rolling, weekly, and monthly plan windows |
 | Command Code | Billing-period plan credits and rolling 5-hour/weekly spending caps |
+| Claude (`claude-bridge`) | Session and weekly subscription windows plus extra-usage spend, via the Claude Code login |
 | xAI | OAuth subscription allowance and credits; explicit menu queries only |
 | Z.AI | Coding Plan quota windows, MCP allowance, plan name, and renewal date |
 
@@ -278,7 +279,7 @@ An absent or incompatible peer preserves standalone fallback and fail-closed mis
 - Numerical usage requires a meaningful provider usage source and verifiable Pi runtime auth.
 - Native `openai` has no verified native-token numerical quota API. Experimental companion reports require same-account setup, cannot independently prove shared identity, and reject incomplete/paginated app lists. Only one user-reported plan weekly comparison has been observed; app agreement and broader live behavior remain unverified.
 - Native Fast mode and earned reset redemption, and OpenAI API-key usage reporting, remain unsupported.
-- GitHub Copilot quota, Kimi managed usage, Z.AI quota, and OpenAI Codex reset redemption rely on provider-owned endpoints that may change without notice.
+- Claude subscription limits, GitHub Copilot quota, Kimi managed usage, Z.AI quota, and OpenAI Codex reset redemption rely on provider-owned endpoints that may change without notice.
 - Codex reset redemption requires a current ChatGPT OAuth credential from Pi's login or a compatible credential source; Codex API keys cannot redeem earned subscription resets.
 - xAI usage supports only a uniquely matched Pi OAuth subscription credential; xAI API keys and Management API credentials are unsupported.
 - Credentials resolved for custom provider base URLs are never forwarded to the providers' official usage endpoints; effective auth origin validation requires Pi 0.81.0 or newer.
@@ -314,7 +315,7 @@ The generated runtime is built from `src/index.ts` and does not import back into
 
 ## 🔎 Keywords
 
-Pi extension, provider usage, Codex usage, subscription limits, reset times, API balances, spending, Codex Fast mode.
+Pi extension, provider usage, Codex usage, Claude usage, subscription limits, reset times, API balances, spending, Codex Fast mode.
 
 ## 📄 License
 
