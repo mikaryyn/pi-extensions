@@ -402,10 +402,19 @@ export const CLAUDE_BRIDGE_ADAPTER: UsageProviderAdapter = {
   id: CLAUDE_BRIDGE_PROVIDER_ID,
   displayName: "Claude",
   semantics: { kind: "consumer-subscription", label: "Claude subscription limits" },
-  async query(auth, signal, timeoutMs) {
-    const payload = await fetchProviderJson(CLAUDE_OAUTH_USAGE_URL, auth, signal, timeoutMs, "Claude usage endpoint", {
-      redirect: "error",
-    });
+  async query(auth, signal, timeoutMs, guard) {
+    if (!guard) throw new Error("Claude usage requires request-boundary revalidation.");
+    const startedAt = Date.now();
+    await guard();
+    const payload = await fetchProviderJson(
+      CLAUDE_OAUTH_USAGE_URL,
+      auth,
+      signal,
+      remainingTimeout(timeoutMs, startedAt, "fetching Claude usage"),
+      "Claude usage endpoint",
+      { redirect: "error" },
+    );
+    await guard();
     return normalizeClaudeOAuthUsagePayload(payload as ClaudeOAuthUsagePayload, Date.now());
   },
 };
@@ -424,20 +433,27 @@ export function isStaleExtensionContextError(error: unknown): boolean {
   );
 }
 
+export interface UsageAuthOptions extends UsageAuthLifecycle {
+  openaiUseCodexUsage?: boolean;
+  claudeCredentialReader?: typeof readClaudeCodeAccessToken;
+}
+
 export async function resolveUsageAuth(
   ctx: ExtensionContext,
   adapter: UsageProviderAdapter,
   salt: Uint8Array = AUTH_FINGERPRINT_SALT,
   credentialReader: StoredCredentialReader = readStoredCredential,
   candidateReader?: OAuthCredentialCandidateReader,
-  /** @deprecated This historical companion argument is ignored; use options instead. */
-  _openaiCompanionUsage?: boolean,
-  options: UsageAuthLifecycle & { openaiUseCodexUsage?: boolean } = {},
+  /** @deprecated This historical companion argument is ignored; pass lifecycle options last instead. */
+  legacyCompanionOrOptions?: boolean | UsageAuthOptions,
+  options: UsageAuthOptions = {},
 ): Promise<ResolvedUsageAuth | undefined> {
-  const guard = createUsageAuthGuard(options);
+  const authOptions =
+    typeof legacyCompanionOrOptions === "object" ? { ...legacyCompanionOrOptions, ...options } : options;
+  const guard = createUsageAuthGuard(authOptions);
   guard.check();
   if (adapter.id === CLAUDE_BRIDGE_PROVIDER_ID) {
-    return guard.wait(() => resolveClaudeBridgeUsageAuth(ctx, salt));
+    return guard.wait(() => resolveClaudeBridgeUsageAuth(ctx, salt, authOptions));
   }
   if (ctx.model?.provider === adapter.id && !hasOfficialOrigin(ctx.model, adapter.id)) {
     throw new Error(
@@ -541,10 +557,10 @@ export async function resolveUsageAuth(
     const native = finalize(
       resolveOpenAIChatGPTAuth(auth, providerResult.auth, providerResult.source, model, offered.candidates),
     );
-    if (options.openaiUseCodexUsage !== true) return native;
+    if (authOptions.openaiUseCodexUsage !== true) return native;
     native.openaiUseCodexUsage = true;
     const { resolveOpenAICompanionAuth } = await guard.wait(() => import("./openai-companion-auth.js"));
-    return resolveOpenAICompanionAuth(ctx, native, salt, credentialReader, candidateReader, options);
+    return resolveOpenAICompanionAuth(ctx, native, salt, credentialReader, candidateReader, authOptions);
   }
   if (adapter.id === "github-copilot") {
     const offered = await guard.wait(() =>
@@ -605,10 +621,12 @@ export async function resolveUsageAuth(
 async function resolveClaudeBridgeUsageAuth(
   ctx: ExtensionContext,
   salt: Uint8Array,
+  options: UsageAuthOptions,
 ): Promise<ResolvedUsageAuth | undefined> {
   const model = candidateModels(ctx, CLAUDE_BRIDGE_PROVIDER_ID)[0];
   if (!model) return undefined;
-  const token = await readClaudeCodeAccessToken();
+  const token = await (options.claudeCredentialReader ?? readClaudeCodeAccessToken)(Date.now(), options.signal);
+  if (options.signal?.aborted) throw abortError();
   if (!token) return undefined;
   const authorization = `Bearer ${token}`;
   const headers = { Authorization: authorization, "anthropic-beta": CLAUDE_OAUTH_BETA };
@@ -668,8 +686,15 @@ export async function queryProviderUsage(
   }
 }
 
-export function providerIsConfigured(ctx: ExtensionContext, providerId: string): boolean {
-  if (providerId === CLAUDE_BRIDGE_PROVIDER_ID) return candidateModels(ctx, providerId).length > 0;
+export function providerIsConfigured(
+  ctx: ExtensionContext,
+  providerId: string,
+  verifiedProviderIds: ReadonlySet<string> = new Set(),
+): boolean {
+  // External logins cannot be inferred synchronously from model registration or Pi auth status.
+  if (providerId === CLAUDE_BRIDGE_PROVIDER_ID) {
+    return verifiedProviderIds.has(providerId) && candidateModels(ctx, providerId).length > 0;
+  }
   try {
     const status = ctx.modelRegistry.getProviderAuthStatus(providerId);
     return status.configured && moonshotProviderAuthSourceIsAllowed(ctx, providerId, status.source, status.label);

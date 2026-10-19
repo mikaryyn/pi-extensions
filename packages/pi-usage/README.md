@@ -14,7 +14,7 @@ The extension keeps each provider's quota, allowance, balance, and spending sema
 - Redeems eligible Codex resets only after fresh account matching and explicit confirmation.
 - Refreshes one or all configured providers with bounded concurrency while preserving partial results.
 - Scopes statusline and cache data to the active provider and runtime account.
-- Resolves credentials through Pi or the process-local OAuth credential-source protocol, waits for compatible pending account activation, and validates the effective provider endpoint before sending them.
+- Resolves Pi credentials or a supported Claude Code subscription login, waits for compatible pending account activation, and keeps credentials scoped to the provider's usage endpoint.
 
 ## 📦 Install
 
@@ -68,7 +68,7 @@ Read the [query and reset guide](./docs/operations.md) for target selection, can
 
 ## ⚙️ Settings
 
-Choose **Settings** in `/usage` to edit Codex Fast mode, percentage display, reset countdown, and optional [OpenAI companion usage](#chatgpt-companion-usage) through Pi's settings-list interaction in TUI mode.
+Choose **Settings** in `/usage` to edit Codex Fast mode, Codex/Claude percentage and reset-countdown preferences, and optional [OpenAI companion usage](#chatgpt-companion-usage) through Pi's settings-list interaction in TUI mode.
 RPC mode reports the active manual settings path instead of opening terminal UI.
 
 These preferences live in `pi-usage.json` under Pi's user agent directory, normally `~/.pi/agent/pi-usage.json`.
@@ -127,6 +127,14 @@ Turn **Codex reset countdown** Off in the TUI Settings screen, or set it to `fal
   "codexStatusResetCountdown": false
 }
 ```
+
+### Claude statusline preferences
+
+The `claudeStatusPercentage` preference accepts `"remaining"` or `"used"` and defaults to `"remaining"`.
+The `claudeStatusResetCountdown` preference defaults to `false`; enabling it replaces window labels with reset countdowns.
+Choose **Claude percentage** or **Claude reset countdown** in Settings, or edit these fields in `pi-usage.json` and run `/reload`.
+These preferences change only the Claude statusline, not the detailed usage report.
+The statusline includes the selected Opus/Sonnet weekly cap when returned, alongside the general session and weekly caps.
 
 ## ChatGPT companion usage
 
@@ -200,15 +208,17 @@ Codex reset redemption requires a freshly matched current OAuth account and expl
 
 ## 🧭 Current and configured accounts
 
-`Current` identifies the provider and credential used by Pi's selected model.
-`Configured` identifies runtime auth for another supported provider, not an active provider.
+`Current` identifies the selected model's provider and its resolved usage credential.
+For Pi-authenticated providers, that credential is matched to runtime auth; Claude instead uses the supported Claude Code login source described in the [provider reference](./docs/providers.md#claude-subscription-limits).
+`Configured` identifies available usage auth for another supported provider, not an active provider.
+Claude is offered in cross-provider queries only after its login is checked; model registration alone is insufficient.
 
 The extension selects one provider target for one query and never flattens targets into provider rows or aggregates every visible target.
 A compatible credential owner may offer the verified active named account through the versioned process-local protocol without exposing its account label or storage.
 When that owner is still activating the requested provider in the current session, `/usage` waits through the extension-neutral `oauth:credential-readiness:v1` protocol before collecting the synchronous credential offer.
 Without such an owner, `pi-usage` retains its standalone Pi `auth.json` behavior.
 An older or incompatible owner degrades to the existing authentication-unavailable result when the stored login does not match runtime auth.
-After the active runtime credential changes, the next command, turn, or scheduled refresh resolves auth again and cannot reuse another account's cached report.
+After the selected usage credential changes, the next command, turn, or scheduled refresh resolves auth again and cannot reuse another account's cached report.
 
 ## 📊 Statusline behavior
 
@@ -231,6 +241,8 @@ Vercel AI Gateway publishes the exact current USD credit balance.
 MiniMax publishes Token Plan window percentages or the regional pay-as-you-go available balance.
 Baseten publishes the exact trailing 30-day Model APIs net subtotal after credits.
 xAI is always menu-only and never starts a scheduled status refresh.
+Claude includes general windows plus the selected model's additional weekly cap, and reads its login during background auth checks.
+Enabled Codex/Claude countdowns repaint once a minute without another usage request.
 Z.AI statusline usage refreshes every five minutes while the selected model remains on Z.AI.
 Verified native OpenAI OAuth with companion usage enabled and valid companion auth refreshes both read-only endpoints automatically. The statusline shows only plan limits, for example `chatgpt plan 70% ↻ 2h30m`; app reset details remain available in `/usage`.
 With companion usage disabled or its login absent, it publishes `chatgpt usage: web only`; refreshes revalidate native auth without calling a usage endpoint.
@@ -262,12 +274,16 @@ Behavior changes:
 
 Credential candidates are collected synchronously in memory after any compatible readiness promises settle, and are not cached, persisted, logged, formatted, or appended to the Pi session.
 The protocols carry no account name or extension identity.
-Only the selected provider's exact runtime match is used, and secrets are sent only to its validated official origin.
+Pi-authenticated providers use only the selected provider's exact runtime match, and secrets are sent only to its validated official origin.
 Native OpenAI status requires fresh Pi OAuth resolution and a matching complete ChatGPT grant, including the direct-token scope and client ID.
 Model-level Authorization overrides cannot inherit subscription status from a stored login.
 Native tokens are never forwarded to ChatGPT backend endpoints.
 The opt-in companion path sends only its validated Codex bearer and matching account ID to fixed `GET /backend-api/wham/usage/chatpass/apps` and `GET /backend-api/wham/usage` routes on `https://chatgpt.com`, rejects redirects, and bounds response sizes and request time.
 Both credential identities and native registration metadata bind cache identity and request-boundary revalidation.
+Claude is a separate integration: it reads `CLAUDE_CODE_OAUTH_TOKEN` or Claude Code's selected Keychain/credential-file login, including during background refreshes and explicit configured-provider discovery.
+The first macOS Keychain read may show an access prompt.
+Claude tokens are sent only to Anthropic's fixed usage endpoint; custom origins and detectable unsupported auth overrides fail closed.
+It never refreshes or writes Claude Code credentials. See the [Claude authentication coverage](./docs/providers.md#claude-subscription-limits) before enabling it.
 Provider-specific endpoints and credential requirements are documented in the [provider reference](./docs/providers.md).
 Pi extensions run with the user's process privileges, so the shared event bus is not a security boundary between installed extensions.
 Install only trusted extensions because they can read user files and process memory.
@@ -276,7 +292,8 @@ An absent or incompatible peer preserves standalone fallback and fail-closed mis
 
 ## 🚧 Limitations
 
-- Numerical usage requires a meaningful provider usage source and verifiable Pi runtime auth.
+- Supported providers need a meaningful usage source and verifiable Pi runtime auth, except Claude's explicitly documented Claude Code login integration.
+- Claude supports production subscription OAuth logins only; API keys, profiles, helper-managed and host-managed auth, descriptor tokens without an explicit OAuth environment token, and custom origins are not supported.
 - Native `openai` has no verified native-token numerical quota API. Experimental companion reports require same-account setup, cannot independently prove shared identity, and reject incomplete/paginated app lists. Only one user-reported plan weekly comparison has been observed; app agreement and broader live behavior remain unverified.
 - Native Fast mode and earned reset redemption, and OpenAI API-key usage reporting, remain unsupported.
 - Claude subscription limits, GitHub Copilot quota, Kimi managed usage, Z.AI quota, and OpenAI Codex reset redemption rely on provider-owned endpoints that may change without notice.

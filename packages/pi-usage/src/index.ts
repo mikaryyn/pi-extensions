@@ -33,6 +33,7 @@ export {
   sanitizeDisplayText,
   UsageCache,
 } from "./core.js";
+export type { ClaudeStatuslineOptions } from "./format.js";
 export { formatProviderStates, formatUsageReport, formatUsageStatusline } from "./format.js";
 export { normalizeBasetenBillingUsagePayload } from "./providers/baseten.js";
 export {
@@ -61,6 +62,7 @@ export { normalizeOpenRouterKeyPayload } from "./providers/openrouter.js";
 export { normalizeVercelAIGatewayCreditsPayload } from "./providers/vercel-ai-gateway.js";
 export { normalizeXaiBillingPayload } from "./providers/xai.js";
 export { normalizeZaiQuotaPayload, normalizeZaiSubscriptionPayload } from "./providers/zai.js";
+export type { UsageAuthOptions } from "./query.js";
 export {
   adapterForProvider,
   CLAUDE_BRIDGE_ADAPTER,
@@ -77,6 +79,7 @@ export type {
   UsageSettings,
   UsageSettingsRuntime,
   UsageSettingsState,
+  UsageStatusPercentage,
   UsageTargetPublicationCheck,
 } from "./settings.js";
 export {

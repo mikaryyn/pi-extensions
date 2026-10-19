@@ -1,4 +1,5 @@
-import type { CodexStatusPercentage } from "./settings.js";
+import { sanitizeDisplayText } from "./core.js";
+import type { CodexStatusPercentage, UsageStatusPercentage } from "./settings.js";
 import {
   renderQuotaStatusline,
   renderQuotaWindow,
@@ -62,16 +63,37 @@ export function formatUsageReport(report: UsageReport, displayState: UsageDispla
   return lines.join("\n").trimEnd();
 }
 
+export interface ClaudeStatuslineOptions {
+  showResetCountdown?: boolean;
+  percentage?: UsageStatusPercentage;
+}
+
 export function formatUsageStatusline(
   report: UsageReport,
   model?: UsageModel,
   now = Date.now(),
   showCodexResetCountdown = true,
   codexStatusPercentage: CodexStatusPercentage = "remaining",
-  display: Partial<StatuslineDisplay> = {},
+  displayOrClaudeOptions: Partial<StatuslineDisplay> | ClaudeStatuslineOptions = {},
+  claudeOptions: ClaudeStatuslineOptions = {},
 ): string | undefined {
-  return formatUsageStatuslineWithCountdown(report, model, now, showCodexResetCountdown, codexStatusPercentage, display)
-    .value;
+  const legacyClaudeOptions =
+    "percentage" in displayOrClaudeOptions || "showResetCountdown" in displayOrClaudeOptions
+      ? displayOrClaudeOptions
+      : undefined;
+  const display: Partial<StatuslineDisplay> = legacyClaudeOptions
+    ? {}
+    : (displayOrClaudeOptions as Partial<StatuslineDisplay>);
+  return formatUsageStatuslineWithCountdown(
+    report,
+    model,
+    now,
+    showCodexResetCountdown,
+    codexStatusPercentage,
+    display,
+    undefined,
+    legacyClaudeOptions ?? claudeOptions,
+  ).value;
 }
 
 interface StatusCountdown {
@@ -90,6 +112,7 @@ export function formatUsageStatuslineWithCountdown(
   codexStatusPercentage: CodexStatusPercentage = "remaining",
   display: Partial<StatuslineDisplay> = {},
   decorateCodexPrefix: (prefix: string) => string = (prefix) => prefix,
+  claudeOptions: ClaudeStatuslineOptions = {},
 ): { value: string | undefined; hasCountdown: boolean } {
   const countdown: StatusCountdown = { now, active: false, display: resolveStatuslineDisplay(display) };
   const value = formatStatusline(
@@ -98,6 +121,7 @@ export function formatUsageStatuslineWithCountdown(
     now,
     showCodexResetCountdown,
     codexStatusPercentage,
+    claudeOptions,
     countdown,
     decorateCodexPrefix,
   );
@@ -110,6 +134,7 @@ function formatStatusline(
   now: number,
   showCodexResetCountdown: boolean,
   codexStatusPercentage: CodexStatusPercentage,
+  claudeOptions: ClaudeStatuslineOptions,
   countdown: StatusCountdown,
   decorateCodexPrefix: (prefix: string) => string,
 ): string | undefined {
@@ -136,7 +161,7 @@ function formatStatusline(
       decorateCodexPrefix,
     );
   }
-  if (report.providerId === "claude-bridge") return formatClaudeStatusline(report);
+  if (report.providerId === "claude-bridge") return formatClaudeStatusline(report, model, now, claudeOptions);
   if (report.providerId === "deepseek") return formatDeepSeekStatusline(report);
   if (report.providerId === "fireworks") return formatFireworksStatusline(report);
   if (report.providerId === "vercel-ai-gateway") return formatVercelAIGatewayStatusline(report);
@@ -227,14 +252,60 @@ function formatClaudeReport(lines: string[], report: UsageReport): void {
   }
 }
 
-function formatClaudeStatusline(report: UsageReport): string | undefined {
-  const parts = report.buckets
-    .filter((bucket) => (bucket.id === "five-hour" || bucket.id === "weekly") && bucket.remaining !== undefined)
-    .map((bucket) => {
-      const fallback = bucket.id === "weekly" ? "weekly" : "5h";
-      return `${clampPercent(bucket.remaining ?? 0).toFixed(0)}% ${formatWindowLabel(bucket.windowMinutes, fallback, true)}`;
-    });
+function formatClaudeStatusline(
+  report: UsageReport,
+  model: UsageModel | undefined,
+  now: number,
+  options: ClaudeStatuslineOptions,
+): string | undefined {
+  const parts: string[] = [];
+  const percentage = options.percentage ?? "remaining";
+  for (const [id, fallback] of [
+    ["five-hour", "5h"],
+    ["weekly", "weekly"],
+  ] as const) {
+    const bucket = report.buckets.find((candidate) => candidate.id === id);
+    const formatted = bucket && formatClaudeStatusBucket(bucket, fallback, percentage, options.showResetCountdown, now);
+    if (formatted) parts.push(formatted);
+  }
+
+  const family = claudeModelFamily(model);
+  if (family) {
+    const bucket = report.buckets.find((candidate) => candidate.id === `weekly-${family}`);
+    const formatted =
+      bucket && formatClaudeStatusBucket(bucket, "weekly", percentage, options.showResetCountdown, now, family);
+    if (formatted) parts.push(formatted);
+  }
   return parts.length > 0 ? `claude ${parts.join(" ")}` : undefined;
+}
+
+function formatClaudeStatusBucket(
+  bucket: UsageBucket,
+  fallback: "5h" | "weekly",
+  percentage: UsageStatusPercentage,
+  showResetCountdown: boolean | undefined,
+  now: number,
+  family?: "opus" | "sonnet",
+): string | undefined {
+  if (bucket.remaining === undefined || !Number.isFinite(bucket.remaining)) return undefined;
+  const remaining = Math.round(clampPercent(bucket.remaining));
+  const percent = percentage === "used" ? 100 - remaining : remaining;
+  const countdown = showResetCountdown ? formatResetCountdown(bucket.resetsAt, now) : undefined;
+  const window = countdown ? `↻ ${countdown}` : formatWindowLabel(bucket.windowMinutes, fallback, true);
+  return `${percent}% ${family ? `${family} ` : ""}${window}`;
+}
+
+function claudeModelFamily(model: UsageModel | undefined): "opus" | "sonnet" | undefined {
+  if (model?.provider !== "claude-bridge") return undefined;
+  const families = new Set<"opus" | "sonnet">();
+  for (const value of [model.id, model.name]) {
+    const words = sanitizeDisplayText(value)
+      .toLowerCase()
+      .split(/[^a-z0-9]+/u);
+    if (words.includes("opus")) families.add("opus");
+    if (words.includes("sonnet")) families.add("sonnet");
+  }
+  return families.size === 1 ? families.values().next().value : undefined;
 }
 
 function formatDeepSeekReport(lines: string[], report: UsageReport): void {

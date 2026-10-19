@@ -292,13 +292,31 @@ They may change without notice, and this paragraph is the contract evidence for 
 - Semantics: Claude subscription session and weekly limits
 - Source: Anthropic's undocumented `GET https://api.anthropic.com/api/oauth/usage` endpoint with the `anthropic-beta: oauth-2025-04-20` header
 - Displayed data: session (5 hour) and weekly utilization with reset times, Opus and Sonnet weekly windows when present, and extra-usage spend
-- Statusline example: `claude 98% 5h 76% wk` (remaining session and weekly percentages)
+- Statusline example: `claude 98% 5h 76% wk 0% opus wk` (remaining general allowances and the selected Opus weekly cap)
 
-Claude has no Pi-registry credential, so `pi-usage` reads the existing Claude Code login: the macOS keychain item `Claude Code-credentials`, or `.credentials.json` under `$CLAUDE_CONFIG_DIR` or `~/.claude` on other platforms.
-Each statusline refresh reads the login again, so the keychain access applies to background refreshes as well.
-The first keychain read may show a macOS access prompt.
-The token is sent only to the fixed Anthropic URL, redirects are rejected, and the token is redacted from errors.
-`pi-usage` never refreshes or writes the login, so an expired token fails with a request to run `claude` once.
+Claude has no Pi-registry credential. For supported production subscription OAuth logins, a non-empty `CLAUDE_CODE_OAUTH_TOKEN` takes precedence over stored credentials; an invalid explicit token fails without falling back to another login.
+Otherwise `pi-usage` reads the selected Claude Code store: the matching macOS Keychain item, or `.credentials.json` in the same directory when the item is absent. Other platforms read that file directly.
+The default directory is `~/.claude`. `CLAUDE_CONFIG_DIR` selects another directory; an explicitly present `CLAUDE_SECURESTORAGE_CONFIG_DIR` overrides credential storage only, and its empty value selects the default store.
+Directories are NFC-normalized without expanding `~`, resolving relative paths, or trimming separators before Keychain hashing; prefer an absolute configured path.
+An empty `CLAUDE_CONFIG_DIR` retains Claude Code's current-directory file behavior.
+
+The default macOS service is `Claude Code-credentials`; non-empty custom directories use the provider's hashed service name.
+The Keychain account is the validated `USER`/OS username, with Claude Code's fallback account for invalid or unavailable usernames.
+These storage names are observed provider-owned CLI behavior, not a stable public schema.
+A custom store never falls back to the default account. Locked, denied, malformed, or timed-out Keychain reads fail closed rather than selecting a potentially stale file login.
+The first Keychain read may show an access prompt. Reads also occur during background refreshes and explicit configured-provider discovery; an absent or expired login is not offered as another configured provider.
+Cancellation stops credential-file and Keychain reads, and request-boundary checks prevent a rotated login's earlier report from being published or cached.
+`pi-usage` never refreshes or writes the login, so an expired stored token fails with a request to run `claude` once.
+
+Only production subscription auth through these sources is covered. API-key/auth-token/custom-header overrides, explicitly selected profiles/federation, host-managed credentials, alternate backend flags, and descriptor-token auth without `CLAUDE_CODE_OAUTH_TOKEN` fail closed when detected in the process environment.
+`CLAUDE_CODE_CUSTOM_OAUTH_URL` and an `ANTHROPIC_BASE_URL` outside Anthropic's official origin are rejected even with an environment token.
+Arbitrary Claude Code settings helpers, profiles selected outside the process environment, or another tool's per-request auth cannot be matched to runtime identity; do not rely on this adapter for those configurations.
+The selected token is sent only to the fixed Anthropic URL, redirects are rejected, and secrets are redacted from errors.
+
+The chip always includes available general session/weekly caps and adds the selected Opus or Sonnet cap when the model ID/name identifies exactly one family; unknown or ambiguous models do not guess.
+`claudeStatusPercentage` accepts `"remaining"` (default) or `"used"`; `claudeStatusResetCountdown` defaults to `false`.
+Enable those preferences through `/usage` → Settings in TUI mode or `pi-usage.json` and `/reload`, as described in the README.
+Countdowns repaint locally once a minute; detailed reports retain all returned model windows and remaining percentages regardless of statusline preferences.
 
 ### xAI consumer subscriptions
 

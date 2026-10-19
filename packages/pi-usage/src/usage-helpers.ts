@@ -3,9 +3,12 @@ import { sanitizeDisplayText } from "./core.js";
 import { providerIsConfigured, usageAdapters } from "./query.js";
 import type { PiModel, UsageProviderAdapter } from "./types.js";
 
-export function configuredAdapters(ctx: ExtensionContext): UsageProviderAdapter[] {
+export function configuredAdapters(
+  ctx: ExtensionContext,
+  verifiedProviderIds?: ReadonlySet<string>,
+): UsageProviderAdapter[] {
   return usageAdapters().filter(
-    (adapter) => adapter.id === ctx.model?.provider || providerIsConfigured(ctx, adapter.id),
+    (adapter) => adapter.id === ctx.model?.provider || providerIsConfigured(ctx, adapter.id, verifiedProviderIds),
   );
 }
 

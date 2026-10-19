@@ -68,8 +68,12 @@ test("Claude report renders bars and currency", () => {
   assert.match(text, /Extra usage spent:\s+EUR 0.74/);
 });
 
-test("Claude bridge adapter publishes a statusline", () => {
-  assert.notEqual(adapterForProvider("claude-bridge")?.publishesStatusline, false);
+test("Claude bridge adapter is registered and publishes a statusline", () => {
+  const adapter = adapterForProvider("claude-bridge");
+  assert.ok(adapter);
+  assert.equal(adapter.id, "claude-bridge");
+  assert.equal(adapter.displayName, "Claude");
+  assert.notEqual(adapter.publishesStatusline, false);
 });
 
 test("Claude statusline shows remaining session and weekly percentages", () => {

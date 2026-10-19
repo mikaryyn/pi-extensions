@@ -15,13 +15,16 @@ import { isBoundedTargetId } from "./usage-targets.js";
 export const USAGE_SETTINGS_FILE = "pi-usage.json";
 export const MAX_USAGE_SETTINGS_BYTES = 64 * 1024;
 
-export type CodexStatusPercentage = "remaining" | "used";
+export type UsageStatusPercentage = "remaining" | "used";
+export type CodexStatusPercentage = UsageStatusPercentage;
 
 export interface UsageSettings {
   openaiUseCodexUsage: boolean;
   codexFastMode: boolean;
   codexStatusResetCountdown: boolean;
   codexStatusPercentage: CodexStatusPercentage;
+  claudeStatusResetCountdown: boolean;
+  claudeStatusPercentage: UsageStatusPercentage;
   selectedTargets: Record<string, string>;
   statuslineDisplay: StatuslineDisplay;
 }
@@ -31,6 +34,8 @@ export const DEFAULT_USAGE_SETTINGS: Readonly<UsageSettings> = Object.freeze({
   codexFastMode: false,
   codexStatusResetCountdown: true,
   codexStatusPercentage: "remaining",
+  claudeStatusResetCountdown: false,
+  claudeStatusPercentage: "remaining",
   selectedTargets: Object.freeze({}),
   statuslineDisplay: DEFAULT_STATUSLINE_DISPLAY,
 });
@@ -89,6 +94,16 @@ export function normalizeUsageSettings(value: unknown): UsageSettings | undefine
   ) {
     return undefined;
   }
+  if (Object.hasOwn(value, "claudeStatusResetCountdown") && typeof value.claudeStatusResetCountdown !== "boolean") {
+    return undefined;
+  }
+  if (
+    Object.hasOwn(value, "claudeStatusPercentage") &&
+    value.claudeStatusPercentage !== "remaining" &&
+    value.claudeStatusPercentage !== "used"
+  ) {
+    return undefined;
+  }
   if (Object.hasOwn(value, "fireworksAccountId") && !isFireworksAccountId(value.fireworksAccountId)) {
     return undefined;
   }
@@ -108,6 +123,12 @@ export function normalizeUsageSettings(value: unknown): UsageSettings | undefine
         : DEFAULT_USAGE_SETTINGS.codexStatusResetCountdown,
     codexStatusPercentage:
       value.codexStatusPercentage === "used" ? "used" : DEFAULT_USAGE_SETTINGS.codexStatusPercentage,
+    claudeStatusResetCountdown:
+      typeof value.claudeStatusResetCountdown === "boolean"
+        ? value.claudeStatusResetCountdown
+        : DEFAULT_USAGE_SETTINGS.claudeStatusResetCountdown,
+    claudeStatusPercentage:
+      value.claudeStatusPercentage === "used" ? "used" : DEFAULT_USAGE_SETTINGS.claudeStatusPercentage,
     selectedTargets: effectiveTargets,
     statuslineDisplay: resolveStatuslineDisplay(value.statuslineDisplay as Partial<StatuslineDisplay> | undefined),
   };

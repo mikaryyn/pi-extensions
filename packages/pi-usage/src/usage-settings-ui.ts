@@ -9,10 +9,18 @@ const ON = "On";
 const REMAINING = "Remaining";
 const USED = "Used";
 
-type UsageSettingId = "codexFastMode" | "codexStatusResetCountdown" | "codexStatusPercentage" | "openaiUseCodexUsage";
+type UsageSettingId =
+  | "codexFastMode"
+  | "codexStatusResetCountdown"
+  | "codexStatusPercentage"
+  | "claudeStatusResetCountdown"
+  | "claudeStatusPercentage"
+  | "openaiUseCodexUsage";
 
 function settingValueLabel(id: UsageSettingId, value: UsageSettings[UsageSettingId]): string {
-  if (id === "codexStatusPercentage") return value === "used" ? USED : REMAINING;
+  if (id === "codexStatusPercentage" || id === "claudeStatusPercentage") {
+    return value === "used" ? USED : REMAINING;
+  }
   return value === true ? ON : OFF;
 }
 
@@ -66,6 +74,20 @@ export async function showUsageSettings(
         currentValue: state.settings.openaiUseCodexUsage ? ON : OFF,
         values: [OFF, ON],
       },
+      {
+        id: "claudeStatusResetCountdown",
+        label: "Claude reset countdown",
+        description: "Show time remaining until each Claude usage limit resets.",
+        currentValue: state.settings.claudeStatusResetCountdown ? ON : OFF,
+        values: [OFF, ON],
+      },
+      {
+        id: "claudeStatusPercentage",
+        label: "Claude percentage",
+        description: "Show remaining or used Claude quota in the statusline.",
+        currentValue: settingValueLabel("claudeStatusPercentage", state.settings.claudeStatusPercentage),
+        values: [REMAINING, USED],
+      },
     ];
     const rule = new HorizontalRule({ ruleStyle: (text) => theme.fg("border", text) });
 
@@ -117,9 +139,14 @@ export async function showUsageSettings(
       getSettingsListTheme(),
       (id, value) => {
         if (closing || signal.aborted || !isCurrent()) return;
-        if (id === "codexStatusPercentage") {
+        if (id === "codexStatusPercentage" || id === "claudeStatusPercentage") {
           queueUpdate(id, value === USED ? "used" : "remaining", value);
-        } else if (id === "codexFastMode" || id === "codexStatusResetCountdown" || id === "openaiUseCodexUsage") {
+        } else if (
+          id === "codexFastMode" ||
+          id === "codexStatusResetCountdown" ||
+          id === "claudeStatusResetCountdown" ||
+          id === "openaiUseCodexUsage"
+        ) {
           queueUpdate(id, value === ON, value);
         }
       },

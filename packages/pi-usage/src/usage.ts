@@ -28,6 +28,7 @@ import {
   isStaleExtensionContextError,
   queryProviderUsage,
   resolveUsageAuth as resolveRuntimeUsageAuth,
+  type UsageAuthOptions,
 } from "./query.js";
 import { createUsageSettingsRuntime, type UsageSettingsRuntime, type UsageSettingsState } from "./settings.js";
 import type {
@@ -66,6 +67,7 @@ const REDEEM_CODEX_RESET = "Redeem usage limit reset…";
 
 type UsageExtensionDependencies = {
   credentialReader?: (providerId: string) => unknown;
+  claudeCredentialReader?: UsageAuthOptions["claudeCredentialReader"];
   createRedemptionId?: () => string;
   settingsRuntime?: UsageSettingsRuntime;
 };
@@ -120,7 +122,7 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
       ? options?.signal
         ? AbortSignal.any([options.signal, controller.signal])
         : controller.signal
-      : undefined;
+      : options?.signal;
     const checkCurrent = () => {
       if (
         !openaiPolicyIsCurrent(policy) ||
@@ -132,8 +134,11 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
     };
     try {
       const auth = await resolveRuntimeUsageAuth(ctx, adapter, salt, reader, candidates, undefined, {
+        ...options,
         openaiUseCodexUsage: policy?.enabled,
-        ...(policy ? { signal, checkCurrent } : {}),
+        claudeCredentialReader: dependencies.claudeCredentialReader,
+        ...(signal ? { signal } : {}),
+        ...(policy ? { checkCurrent } : {}),
       });
       if (policy) checkCurrent();
       return auth;
@@ -148,6 +153,7 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
   const failureBackoff = new Map<string, { until: number; message: string }>();
   const latestQueries = new Map<string, number>();
   const activeControllers = new Set<AbortController>();
+  const authControllers = new Set<AbortController>();
   const nativeQueryControllers = new Set<AbortController>();
   let querySequence = 0;
   let activeCurrentIdentity: string | undefined;
@@ -158,6 +164,12 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
   let statusCountdownTimer: ReturnType<typeof setTimeout> | undefined;
   let statusController: AbortController | undefined;
   let fastRuntime: ReturnType<typeof registerCodexFastMode>;
+
+  const advanceStatusGeneration = () => {
+    statusGeneration += 1;
+    statusController?.abort();
+    return statusGeneration;
+  };
 
   const clearStatusRefreshTimer = () => {
     if (statusRefreshTimer) clearTimeout(statusRefreshTimer);
@@ -185,8 +197,7 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
   };
 
   const clearStatus = (ctx: ExtensionContext) => {
-    statusGeneration += 1;
-    statusController?.abort();
+    advanceStatusGeneration();
     statusController = undefined;
     clearStatusTimers();
     safeSetStatus(ctx, undefined);
@@ -232,6 +243,8 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
     const settings = settingsRuntime.get().settings;
     const showCodexResetCountdown =
       outcome.state.report.providerId === "openai-codex" && settings.codexStatusResetCountdown;
+    const showClaudeResetCountdown =
+      outcome.state.report.providerId === "claude-bridge" && settings.claudeStatusResetCountdown;
     const isCompanionReport = outcome.state.report.source === "openai-chatgpt-companion";
     const now = Date.now();
     // Fast belongs to the provider placeholder even when a template moves it after the windows.
@@ -239,10 +252,14 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
       outcome.state.report,
       model,
       now,
-      showCodexResetCountdown,
+      settings.codexStatusResetCountdown,
       settings.codexStatusPercentage,
       settings.statuslineDisplay,
       (prefix) => fastRuntime.decorateStatus(model, prefix),
+      {
+        showResetCountdown: settings.claudeStatusResetCountdown,
+        percentage: settings.claudeStatusPercentage,
+      },
     );
     const value = status.value;
     if (!safeSetStatus(ctx, value)) return;
@@ -250,7 +267,7 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
     if (
       sessionActive &&
       (status.hasCountdown ||
-        ((showCodexResetCountdown || isCompanionReport) &&
+        ((showCodexResetCountdown || showClaudeResetCountdown || isCompanionReport) &&
           outcome.state.report.buckets.some(
             (bucket) =>
               (!isCompanionReport || bucket.groupId === "chatgpt-plan") &&
@@ -268,6 +285,57 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
       }, STATUS_COUNTDOWN_REFRESH_MS);
       statusCountdownTimer.unref?.();
     }
+  };
+
+  const resolveAuth = async (
+    ctx: ExtensionContext,
+    adapter: UsageProviderAdapter,
+    signal: AbortSignal,
+    deadlineAt: number,
+    description = `resolving ${adapter.displayName} runtime auth`,
+  ): Promise<ResolvedUsageAuth | undefined> => {
+    const lifetime = new AbortController();
+    authControllers.add(lifetime);
+    const ownedSignal = AbortSignal.any([signal, lifetime.signal]);
+    try {
+      return await awaitWithDeadline(
+        resolveUsageAuth(ctx, adapter, undefined, credentialReader, credentialCandidates, undefined, {
+          signal: ownedSignal,
+          claudeCredentialReader: dependencies.claudeCredentialReader,
+        }),
+        signal,
+        Math.max(1, deadlineAt - Date.now()),
+        description,
+      );
+    } finally {
+      // Promise deadlines alone do not stop a child process or credential-file read.
+      lifetime.abort();
+      authControllers.delete(lifetime);
+    }
+  };
+
+  const loadConfiguredAdapters = async (ctx: ExtensionContext, signal: AbortSignal) => {
+    const adapter = adapterForProvider("claude-bridge");
+    if (!adapter || ctx.model?.provider === adapter.id) return configuredAdapters(ctx);
+    const expectedGeneration = sessionGeneration;
+    const expectedSessionId = ctx.sessionManager.getSessionId();
+    const expectedModelIdentity = modelIdentity(ctx.model);
+    let auth: ResolvedUsageAuth | undefined;
+    try {
+      auth = await resolveAuth(ctx, adapter, signal, Date.now() + DEFAULT_TIMEOUT_MS);
+    } catch (error) {
+      if (isAbortError(error) || isStaleExtensionContextError(error)) throw error;
+      // An absent, expired, or inaccessible external login is not a configured provider.
+    }
+    if (
+      signal.aborted ||
+      expectedGeneration !== sessionGeneration ||
+      expectedSessionId !== ctx.sessionManager.getSessionId() ||
+      expectedModelIdentity !== modelIdentity(ctx.model)
+    ) {
+      throw abortError();
+    }
+    return configuredAdapters(ctx, new Set(auth ? [adapter.id] : []));
   };
 
   const invalidateProviderState = (providerId: string) => {
@@ -309,12 +377,7 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
     const providerName = providerDisplayName(ctx, adapter.id);
     let auth: ResolvedUsageAuth | undefined;
     try {
-      auth = await awaitWithDeadline(
-        resolveUsageAuth(ctx, adapter, undefined, credentialReader, credentialCandidates, undefined, { signal }),
-        signal,
-        Math.max(1, deadlineAt - Date.now()),
-        `resolving ${adapter.displayName} runtime auth`,
-      );
+      auth = await resolveAuth(ctx, adapter, signal, deadlineAt);
     } catch (error) {
       if (signal.aborted || !openaiPolicyIsCurrent(expectedPolicy)) throw abortError();
       if (isStaleExtensionContextError(error) || isAbortError(error)) throw error;
@@ -344,6 +407,7 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
       adapter.targets !== undefined ||
       [
         "baseten",
+        "claude-bridge",
         "command-code",
         "deepseek",
         "minimax",
@@ -385,15 +449,16 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
     const guard = async () => {
       if (signal.aborted || requestContextChanged()) throw abortError();
       if (!requiresRequestBoundaryGuard) return;
-      const revalidated = await awaitWithDeadline(
-        resolveUsageAuth(ctx, adapter, undefined, credentialReader, credentialCandidates, undefined, { signal }),
+      const revalidated = await resolveAuth(
+        ctx,
+        adapter,
         signal,
-        Math.max(1, deadlineAt - Date.now()),
+        deadlineAt,
         `revalidating ${providerName} runtime auth`,
       );
       if (signal.aborted || requestContextChanged()) throw abortError();
       if (revalidated?.fingerprint !== auth.fingerprint) {
-        if (["deepseek", "minimax", "minimax-cn"].includes(adapter.id)) {
+        if (["claude-bridge", "deepseek", "minimax", "minimax-cn"].includes(adapter.id)) {
           retryableAuthChanged = true;
           throw new Error(`${providerName} runtime credential changed during the usage query.`);
         }
@@ -588,19 +653,21 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
       ctx.sessionManager.getSessionId() !== expectedSessionId ||
       modelIdentity(ctx.model) !== expectedModel ||
       settingsRuntime.get().settings.selectedTargets[adapter.id] !== expectedTargetId;
-    const auth = await awaitWithDeadline(
-      resolveUsageAuth(ctx, adapter, undefined, credentialReader, credentialCandidates, undefined, { signal }),
+    const auth = await resolveAuth(
+      ctx,
+      adapter,
       signal,
-      Math.max(1, deadlineAt - Date.now()),
+      deadlineAt,
       `resolving ${providerDisplayName(ctx, adapter.id)} runtime auth`,
     );
     if (!auth || signal.aborted || changed()) throw abortError();
     const guard = async () => {
       if (signal.aborted || changed()) throw abortError();
-      const revalidated = await awaitWithDeadline(
-        resolveUsageAuth(ctx, adapter, undefined, credentialReader, credentialCandidates, undefined, { signal }),
+      const revalidated = await resolveAuth(
+        ctx,
+        adapter,
         signal,
-        Math.max(1, deadlineAt - Date.now()),
+        deadlineAt,
         `revalidating ${providerDisplayName(ctx, adapter.id)} runtime auth`,
       );
       if (signal.aborted || changed() || revalidated?.fingerprint !== auth.fingerprint) {
@@ -648,10 +715,8 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
       clearStatus(ctx);
       return;
     }
-    statusGeneration += 1;
-    const generation = statusGeneration;
+    const generation = advanceStatusGeneration();
     clearStatusCountdownTimer();
-    statusController?.abort();
     const controller = new AbortController();
     statusController = controller;
     activeControllers.add(controller);
@@ -730,10 +795,11 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
     if (outcome.authState) {
       if (!adapter) return false;
       try {
-        const auth = await awaitWithDeadline(
-          resolveUsageAuth(ctx, adapter, undefined, credentialReader, credentialCandidates, undefined, { signal }),
+        const auth = await resolveAuth(
+          ctx,
+          adapter,
           signal,
-          DEFAULT_TIMEOUT_MS,
+          Date.now() + DEFAULT_TIMEOUT_MS,
           `revalidating ${adapter.displayName} runtime auth`,
         );
         return (
@@ -769,10 +835,11 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
     if (!outcome.fingerprint) return true;
     if (!adapter) return false;
     try {
-      const auth = await awaitWithDeadline(
-        resolveUsageAuth(ctx, adapter, undefined, credentialReader, credentialCandidates, undefined, { signal }),
+      const auth = await resolveAuth(
+        ctx,
+        adapter,
         signal,
-        DEFAULT_TIMEOUT_MS,
+        Date.now() + DEFAULT_TIMEOUT_MS,
         `revalidating ${adapter.displayName} runtime auth`,
       );
       return (
@@ -841,6 +908,7 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
 
   const showMenu = async (ctx: ExtensionCommandContext): Promise<void> => {
     if (!ctx.hasUI) throw new Error("/usage requires TUI or RPC mode.");
+    for (const activeController of activeControllers) activeController.abort();
     const controller = new AbortController();
     const menuSessionGeneration = sessionGeneration;
     activeControllers.add(controller);
@@ -868,6 +936,7 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
       publishStableCurrent(ctx, stableCurrent);
       let current = stableCurrent.outcome;
       let visibleStates: ProviderUsageState[] = [current.state];
+      let availableAdapters = configuredAdapters(ctx);
       let fastState = settingsRuntime.get();
       let resetAvailability: CodexResetAvailability | undefined;
       let selectedReset: CodexResetOption | undefined;
@@ -1064,7 +1133,7 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
           providers: () => ({
             kind: "actions",
             title: "Select a configured provider",
-            items: configuredAdapters(ctx)
+            items: availableAdapters
               .filter((adapter) => adapter.id !== ctx.model?.provider)
               .map((adapter) => ({
                 id: adapter.id,
@@ -1208,7 +1277,10 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
                   return;
                 }
                 if (
-                  (id === "codexStatusResetCountdown" || id === "codexStatusPercentage") &&
+                  (id === "codexStatusResetCountdown" ||
+                    id === "codexStatusPercentage" ||
+                    id === "claudeStatusResetCountdown" ||
+                    id === "claudeStatusPercentage") &&
                   stableCurrent &&
                   statusGeneration === menuGeneration &&
                   !controller.signal.aborted
@@ -1378,7 +1450,15 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
             return { kind: "stay" };
           },
           another: async () => {
-            const others = configuredAdapters(ctx).filter((adapter) => adapter.id !== ctx.model?.provider);
+            const adapters = await runMenuOperation(
+              ctx,
+              "Checking configured provider logins…",
+              controller.signal,
+              (signal) => loadConfiguredAdapters(ctx, signal),
+            );
+            if (!adapters || controller.signal.aborted || statusGeneration !== menuGeneration) return { kind: "close" };
+            availableAdapters = adapters;
+            const others = adapters.filter((adapter) => adapter.id !== ctx.model?.provider);
             if (others.length === 0) {
               ctx.ui.notify("No other supported provider has configured runtime auth.", "info");
               return { kind: "stay" };
@@ -1386,7 +1466,7 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
             return { kind: "to", screen: "providers" };
           },
           provider: async ({ itemId }) => {
-            const adapter = configuredAdapters(ctx).find(
+            const adapter = availableAdapters.find(
               (candidate) => candidate.id === itemId && candidate.id !== ctx.model?.provider,
             );
             if (!adapter) return { kind: "back" };
@@ -1432,14 +1512,14 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
             return { kind: "back" };
           },
           all: async () => {
-            const adapters = configuredAdapters(ctx);
-            const currentProviderId = ctx.model?.provider;
-            const settled = await runMenuOperation(
+            const result = await runMenuOperation(
               ctx,
               "Checking configured provider usage…",
               controller.signal,
-              (signal) =>
-                runWithConcurrency(
+              async (signal) => {
+                const adapters = await loadConfiguredAdapters(ctx, signal);
+                const currentProviderId = ctx.model?.provider;
+                const settled = await runWithConcurrency(
                   adapters,
                   ALL_PROVIDER_CONCURRENCY,
                   (adapter, _index, workerSignal) =>
@@ -1451,9 +1531,12 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
                       workerSignal,
                     ),
                   signal,
-                ),
+                );
+                return { adapters, currentProviderId, settled };
+              },
             );
-            if (!settled) return { kind: "stay" };
+            if (!result || controller.signal.aborted || statusGeneration !== menuGeneration) return { kind: "stay" };
+            const { adapters, currentProviderId, settled } = result;
             const queriedStates: ProviderUsageState[] = settled.map((result, index) => {
               if (result.status === "fulfilled") {
                 return { ...result.value.state, displayState: "configured" };
@@ -1523,7 +1606,7 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
   });
   pi.on("session_start", async (_event, ctx) => {
     sessionGeneration += 1;
-    statusGeneration += 1;
+    advanceStatusGeneration();
     clearStatusTimers();
     for (const controller of activeControllers) controller.abort();
     activeControllers.clear();
@@ -1539,20 +1622,23 @@ export default function usageExtension(pi: ExtensionAPI, dependencies: UsageExte
     }
   });
   pi.on("session_tree", (_event, ctx) => {
+    for (const controller of authControllers) controller.abort();
     startStatusRefresh(ctx, ctx.model, false);
   });
   pi.on("model_select", (event, ctx) => {
     // Cancel read-only native queries, not confirmed legacy reset mutations.
     for (const controller of nativeQueryControllers) controller.abort();
+    for (const controller of authControllers) controller.abort();
     startStatusRefresh(ctx, event.model, false);
   });
   pi.on("turn_start", (_event, ctx) => {
+    for (const controller of authControllers) controller.abort();
     startStatusRefresh(ctx, ctx.model, false);
   });
   pi.on("session_shutdown", (_event, ctx) => {
     sessionActive = false;
     sessionGeneration += 1;
-    statusGeneration += 1;
+    advanceStatusGeneration();
     clearStatusTimers();
     for (const controller of activeControllers) controller.abort();
     activeControllers.clear();

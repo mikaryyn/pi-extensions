@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
-import { sanitizeDisplayText } from "../core.js";
+import { abortError, sanitizeDisplayText } from "../core.js";
 import type { ClaudeOAuthUsagePayload, UsageBucket, UsageMetric, UsageReport } from "../types.js";
 
 export const CLAUDE_BRIDGE_PROVIDER_ID = "claude-bridge";
@@ -11,7 +12,33 @@ export const CLAUDE_OAUTH_BETA = "oauth-2025-04-20";
 
 const KEYCHAIN_SERVICE = "Claude Code-credentials";
 const KEYCHAIN_TIMEOUT_MS = 5_000;
+const KEYCHAIN_ACCOUNT_FALLBACK = "claude-code-user";
 const EXPIRED_MESSAGE = "Claude Code login has expired. Run `claude` once to refresh it.";
+const INVALID_TOKEN_MESSAGE = "Claude Code OAuth token is invalid.";
+const KEYCHAIN_READ_ERROR = "Unable to read Claude Code credentials from the macOS Keychain.";
+const KEYCHAIN_ACCESS_ERROR = "Claude Code Keychain access was denied or is unavailable.";
+const KEYCHAIN_TIMEOUT_ERROR = "Timed out reading Claude Code credentials from the macOS Keychain.";
+const KEYCHAIN_INVALID_ERROR = "Claude Code Keychain credentials are invalid.";
+const CREDENTIALS_FILE_READ_ERROR = "Unable to read Claude Code credentials file.";
+const UNSUPPORTED_OAUTH_ENDPOINT_ERROR = "Claude Code custom OAuth endpoints are not supported for usage reporting.";
+const UNSUPPORTED_AUTH_ERROR =
+  "Claude usage cannot match this Claude Code authentication override to a subscription login.";
+const ALTERNATE_AUTH_VARIABLES = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_CUSTOM_HEADERS",
+  "ANTHROPIC_PROFILE",
+  "ANTHROPIC_FEDERATION_RULE_ID",
+  "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+  "CLAUDE_CODE_HOST_CREDS_FILE",
+] as const;
+const ALTERNATE_PROVIDER_FLAGS = [
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+  "CLAUDE_CODE_USE_MANTLE",
+  "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+] as const;
 
 const WINDOWS = [
   { key: "five_hour", id: "five-hour", label: "Session", windowMinutes: 300 },
@@ -80,37 +107,189 @@ export function parseClaudeCodeAccessToken(raw: string, now: number): string | u
   }
   const oauth = asObject(asObject(parsed)?.claudeAiOauth);
   const token = oauth?.accessToken;
-  if (typeof token !== "string" || !token) return undefined;
+  if (typeof token !== "string" || invalidAccessToken(token)) return undefined;
   const expiresAt = asFiniteNumber(oauth?.expiresAt);
   if (expiresAt !== undefined && expiresAt <= now) throw new Error(EXPIRED_MESSAGE);
   return token;
 }
 
 /** Reads Claude Code's existing login without refreshing or writing it back. */
-export async function readClaudeCodeAccessToken(now: number = Date.now()): Promise<string | undefined> {
-  if (process.platform === "darwin") {
-    const stored = await readKeychain();
-    const token = stored === undefined ? undefined : parseClaudeCodeAccessToken(stored, now);
-    if (token) return token;
+export async function readClaudeCodeAccessToken(
+  now: number = Date.now(),
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  throwIfAborted(signal);
+
+  // An environment token can also belong to a custom OAuth origin; never forward it to production.
+  if (process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL) throw new Error(UNSUPPORTED_OAUTH_ENDPOINT_ERROR);
+  assertSupportedAuthEnvironment();
+  const environmentToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (environmentToken !== undefined && environmentToken.length > 0) {
+    if (invalidAccessToken(environmentToken)) throw new Error(INVALID_TOKEN_MESSAGE);
+    return environmentToken;
   }
-  const directory = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR) throw new Error(UNSUPPORTED_AUTH_ERROR);
+  const storage = selectedCredentialStorage();
+  if (process.platform === "darwin") {
+    const stored = await readKeychain(storage.service, keychainAccount(), signal);
+    throwIfAborted(signal);
+    if (stored !== undefined) {
+      const token = parseClaudeCodeAccessToken(stored, now);
+      if (token) return token;
+      throw new Error(KEYCHAIN_INVALID_ERROR);
+    }
+  }
+
+  const credentialsPath = join(storage.directory, ".credentials.json");
+  let raw: string;
   try {
-    return parseClaudeCodeAccessToken(await readFile(join(directory, ".credentials.json"), "utf8"), now);
+    raw = await readFile(credentialsPath, { encoding: "utf8", signal });
   } catch (error) {
-    if (error instanceof Error && error.message === EXPIRED_MESSAGE) throw error;
-    return undefined;
+    throwIfAborted(signal);
+    if (isErrorCode(error, "ENOENT")) return undefined;
+    if (isAbortError(error)) throw abortError();
+    throw new Error(CREDENTIALS_FILE_READ_ERROR);
+  }
+  throwIfAborted(signal);
+  return parseClaudeCodeAccessToken(raw, now);
+}
+
+interface CredentialStorage {
+  directory: string;
+  service: string;
+}
+
+function assertSupportedAuthEnvironment(): void {
+  if (
+    ALTERNATE_AUTH_VARIABLES.some((key) => Boolean(process.env[key])) ||
+    ALTERNATE_PROVIDER_FLAGS.some((key) => /^(1|true|yes|on)$/iu.test(process.env[key]?.trim() ?? ""))
+  ) {
+    throw new Error(UNSUPPORTED_AUTH_ERROR);
+  }
+  if (process.env.ANTHROPIC_BASE_URL) {
+    try {
+      if (new URL(process.env.ANTHROPIC_BASE_URL).origin === new URL(CLAUDE_OAUTH_USAGE_URL).origin) return;
+    } catch {
+      // Never include the overridden URL, which may contain credentials, in an error.
+    }
+    throw new Error(UNSUPPORTED_OAUTH_ENDPOINT_ERROR);
   }
 }
 
-function readKeychain(): Promise<string | undefined> {
-  return new Promise((resolve) => {
-    execFile(
-      "security",
-      ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-      { timeout: KEYCHAIN_TIMEOUT_MS, maxBuffer: 64 * 1024 },
-      (error, stdout) => resolve(error ? undefined : stdout.trim() || undefined),
-    );
+function selectedCredentialStorage(): CredentialStorage {
+  const secureStorageDirectory = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  if (secureStorageDirectory !== undefined) {
+    if (!secureStorageDirectory) return defaultCredentialStorage();
+    const directory = secureStorageDirectory.normalize("NFC");
+    return { directory, service: customKeychainService(directory) };
+  }
+
+  const configDirectory = process.env.CLAUDE_CONFIG_DIR;
+  if (configDirectory === undefined) return defaultCredentialStorage();
+  const directory = configDirectory.normalize("NFC");
+  return {
+    directory,
+    service: configDirectory ? customKeychainService(directory) : KEYCHAIN_SERVICE,
+  };
+}
+
+function defaultCredentialStorage(): CredentialStorage {
+  return { directory: join(homedir(), ".claude").normalize("NFC"), service: KEYCHAIN_SERVICE };
+}
+
+function customKeychainService(directory: string): string {
+  // Claude Code's custom-directory suffix is observed CLI behavior, not a public storage schema.
+  const hash = createHash("sha256").update(directory).digest("hex").slice(0, 8);
+  return `${KEYCHAIN_SERVICE}-${hash}`;
+}
+
+function keychainAccount(): string {
+  let candidate = process.env.USER;
+  if (!candidate) {
+    try {
+      candidate = userInfo().username;
+    } catch {
+      return KEYCHAIN_ACCOUNT_FALLBACK;
+    }
+  }
+  return /^[A-Za-z0-9._-]+$/.test(candidate) ? candidate : KEYCHAIN_ACCOUNT_FALLBACK;
+}
+
+function readKeychain(service: string, account: string, signal?: AbortSignal): Promise<string | undefined> {
+  return new Promise((resolve, reject) => {
+    throwIfAborted(signal);
+    try {
+      execFile(
+        "security",
+        ["find-generic-password", "-a", account, "-s", service, "-w"],
+        { timeout: KEYCHAIN_TIMEOUT_MS, maxBuffer: 64 * 1024, signal },
+        (error, stdout) => {
+          if (signal?.aborted || isAbortError(error)) {
+            reject(abortError());
+            return;
+          }
+          if (error) {
+            if (isMissingKeychainItem(error)) {
+              resolve(undefined);
+              return;
+            }
+            if (isKeychainTimeout(error)) {
+              reject(new Error(KEYCHAIN_TIMEOUT_ERROR));
+              return;
+            }
+            if (isKeychainAccessError(error)) {
+              reject(new Error(KEYCHAIN_ACCESS_ERROR));
+              return;
+            }
+            reject(new Error(KEYCHAIN_READ_ERROR));
+            return;
+          }
+          resolve(stdout.trim());
+        },
+      );
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) reject(abortError());
+      else if (isMissingKeychainItem(error)) resolve(undefined);
+      else reject(new Error(KEYCHAIN_READ_ERROR));
+    }
   });
+}
+
+function isMissingKeychainItem(error: unknown): boolean {
+  return isErrorCode(error, "ENOENT") || isErrorCode(error, "44");
+}
+
+function isKeychainTimeout(error: unknown): boolean {
+  return isErrorCode(error, "ETIMEDOUT") || Boolean(asObject(error)?.killed);
+}
+
+function isKeychainAccessError(error: unknown): boolean {
+  const detail = asObject(error);
+  const code = typeof detail?.code === "string" ? detail.code : "";
+  const message = typeof detail?.message === "string" ? detail.message : "";
+  return (
+    code === "EACCES" ||
+    code === "EPERM" ||
+    code === "ELOCKED" ||
+    /denied|locked|interaction not allowed|user interaction/i.test(`${code} ${message}`)
+  );
+}
+
+function isErrorCode(error: unknown, code: string): boolean {
+  const value = asObject(error)?.code;
+  return value === code || value === Number(code);
+}
+
+function invalidAccessToken(value: string): boolean {
+  return !value || /[^\x21-\x7e]/u.test(value);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError();
+}
+
+function isAbortError(error: unknown): boolean {
+  return asObject(error)?.name === "AbortError";
 }
 
 function resetTimestamp(value: unknown): number | undefined {

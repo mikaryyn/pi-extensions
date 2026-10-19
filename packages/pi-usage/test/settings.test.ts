@@ -29,6 +29,8 @@ test("normalizes owned settings and ignores the retired xAI field", () => {
     codexFastMode: true,
     codexStatusResetCountdown: true,
     codexStatusPercentage: "remaining",
+    claudeStatusResetCountdown: false,
+    claudeStatusPercentage: "remaining",
     selectedTargets: {},
     statuslineDisplay: DEFAULT_USAGE_SETTINGS.statuslineDisplay,
   });
@@ -37,6 +39,8 @@ test("normalizes owned settings and ignores the retired xAI field", () => {
     codexFastMode: false,
     codexStatusResetCountdown: true,
     codexStatusPercentage: "remaining",
+    claudeStatusResetCountdown: false,
+    claudeStatusPercentage: "remaining",
     selectedTargets: { fireworks: "acme-prod" },
     statuslineDisplay: DEFAULT_USAGE_SETTINGS.statuslineDisplay,
   });
@@ -50,6 +54,8 @@ test("normalizes owned settings and ignores the retired xAI field", () => {
       codexFastMode: false,
       codexStatusResetCountdown: true,
       codexStatusPercentage: "remaining",
+      claudeStatusResetCountdown: false,
+      claudeStatusPercentage: "remaining",
       selectedTargets: { fireworks: "current", custom: "project-1" },
       statuslineDisplay: DEFAULT_USAGE_SETTINGS.statuslineDisplay,
     },
@@ -292,6 +298,8 @@ test("normalizes the Codex reset countdown status preference", () => {
     codexFastMode: false,
     codexStatusResetCountdown: false,
     codexStatusPercentage: "remaining",
+    claudeStatusResetCountdown: false,
+    claudeStatusPercentage: "remaining",
     selectedTargets: {},
     statuslineDisplay: DEFAULT_USAGE_SETTINGS.statuslineDisplay,
   });
@@ -304,6 +312,8 @@ test("normalizes the Codex status percentage preference", () => {
     codexFastMode: false,
     codexStatusResetCountdown: true,
     codexStatusPercentage: "used",
+    claudeStatusResetCountdown: false,
+    claudeStatusPercentage: "remaining",
     selectedTargets: {},
     statuslineDisplay: DEFAULT_USAGE_SETTINGS.statuslineDisplay,
   });
@@ -325,4 +335,50 @@ test("persists the Codex status percentage preference without replacing unknown 
     codexStatusPercentage: "used",
   });
   assert.equal((await runtime.reload()).settings.codexStatusPercentage, "used");
+});
+
+test("normalizes Claude statusline defaults and rejects malformed preferences", () => {
+  assert.deepEqual(normalizeUsageSettings({}), DEFAULT_USAGE_SETTINGS);
+  assert.deepEqual(normalizeUsageSettings({ claudeStatusResetCountdown: true, claudeStatusPercentage: "used" }), {
+    ...DEFAULT_USAGE_SETTINGS,
+    claudeStatusResetCountdown: true,
+    claudeStatusPercentage: "used",
+  });
+  assert.equal(normalizeUsageSettings({ claudeStatusResetCountdown: "true" }), undefined);
+  assert.equal(normalizeUsageSettings({ claudeStatusPercentage: "consumed" }), undefined);
+  assert.equal(normalizeUsageSettings({ claudeStatusPercentage: false }), undefined);
+});
+
+test("Claude statusline preferences save in order, preserve unknown fields, reload, and retain prior state on failure", async () => {
+  const path = await tempSettingsPath();
+  await writeFile(path, '{"future":"kept","claudeStatusResetCountdown":false}\n');
+  const runtime = createUsageSettingsRuntime(path);
+  await runtime.reload();
+
+  const percentageSave = runtime.update({ claudeStatusPercentage: "used" });
+  const countdownSave = runtime.update({ claudeStatusResetCountdown: true });
+  await Promise.all([percentageSave, countdownSave]);
+
+  assert.deepEqual(JSON.parse(await readFile(path, "utf8")), {
+    future: "kept",
+    claudeStatusResetCountdown: true,
+    claudeStatusPercentage: "used",
+  });
+  const reloaded = await runtime.reload();
+  assert.equal(reloaded.settings.claudeStatusPercentage, "used");
+  assert.equal(reloaded.settings.claudeStatusResetCountdown, true);
+
+  const failingPath = await tempSettingsPath();
+  await writeFile(failingPath, '{"future":"kept","claudeStatusPercentage":"used"}\n');
+  const failingRuntime = createUsageSettingsRuntime({
+    path: failingPath,
+    operations: { rename: async () => Promise.reject(new Error("rename rejected")) },
+  });
+  await failingRuntime.reload();
+  await assert.rejects(failingRuntime.update({ claudeStatusResetCountdown: true }), /rename rejected/);
+  assert.equal(failingRuntime.get().settings.claudeStatusResetCountdown, false);
+  assert.deepEqual(JSON.parse(await readFile(failingPath, "utf8")), {
+    future: "kept",
+    claudeStatusPercentage: "used",
+  });
 });

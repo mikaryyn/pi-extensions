@@ -180,3 +180,74 @@ test("generated runtime is loadable by Pi's Jiti resource loader", async () => {
     await rm(root, { force: true, recursive: true });
   }
 });
+
+test("generated runtime queries Claude usage without reading user credential files", async () => {
+  const builder = await loadBuilder();
+  const root = await mkdtemp(join(packageRoot, ".pi-usage-build-test-claude-"));
+  const agentDir = join(root, "agent");
+  const output = join(root, "dist");
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const originalFetch = globalThis.fetch;
+  const credentialEnvironmentKeys = new Set([
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    ...Object.keys(process.env).filter((key) => key.startsWith("CLAUDE_CODE_") || key.startsWith("ANTHROPIC_")),
+  ]);
+  const credentialEnvironment = new Map([...credentialEnvironmentKeys].map((key) => [key, process.env[key]]));
+  try {
+    for (const key of credentialEnvironmentKeys) delete process.env[key];
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "fake-generated-runtime-token";
+    const requests: string[] = [];
+    globalThis.fetch = async (input) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({ five_hour: { utilization: 2 }, seven_day_opus: { utilization: 100 } }));
+    };
+    await builder.buildRuntime({ outputDirectory: output });
+    await mkdir(agentDir, { recursive: true });
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    const loader = new DefaultResourceLoader({
+      cwd: root,
+      agentDir,
+      settingsManager: SettingsManager.inMemory({}),
+      additionalExtensionPaths: [join(output, "index.ts")],
+    });
+    await loader.reload();
+    const loaded = loader.getExtensions();
+    assert.deepEqual(loaded.errors, []);
+    const extension = loaded.extensions[0];
+    assert.ok(extension);
+    const model = {
+      id: "claude-opus-test",
+      name: "Claude Opus",
+      provider: "claude-bridge",
+      baseUrl: "http://bridge.invalid",
+    };
+    const context = createMockContext({
+      mode: "rpc",
+      hasUI: true,
+      cwd: root,
+      model,
+      modelRegistry: {
+        getAvailable: () => [model],
+        getAll: () => [model],
+        getProviderDisplayName: () => "Claude",
+      },
+      select: async () => "Close",
+    });
+    await extension.commands.get("usage")?.handler("", context.ctx);
+    assert.deepEqual(requests, ["https://api.anthropic.com/api/oauth/usage"]);
+    assert.equal(context.statuses.get("usage"), "claude 98% 5h 0% opus wk");
+    for (const handler of extension.handlers.get("session_shutdown") ?? []) {
+      await handler({ reason: "quit" } as never, context.ctx);
+    }
+    assert.equal(context.statuses.get("usage"), undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [key, value] of credentialEnvironment) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(root, { force: true, recursive: true });
+  }
+});
